@@ -8,7 +8,8 @@ Node.js Express API with Stripe and Supabase.
    - Copy `.env.example` to `.env` (or use the existing `.env`).
    - Set `STRIPE_SECRET_KEY` (already set for test mode).
    - Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from your [Supabase](https://supabase.com) project (Settings → API).
-   - Optionally set `PORT` (default 5000) and `FRONTEND_URL` (default `http://localhost:5173`).
+   - Optionally set `PORT` (default 5000) and `FRONTEND_URL` (default `http://biomedpharmas.com`).
+   - **CORS**: The API allows `FRONTEND_URL`, its http/https variant, `localhost:5173`, and any `*.vercel.app` origin. To allow more origins (e.g. a custom domain), set `ADDITIONAL_ORIGINS` to a comma-separated list (e.g. `https://myapp.com,https://www.myapp.com`).
 
 2. **Supabase**
    - In Supabase Dashboard → SQL Editor, run the script in project root: `supabase-orders-table.sql`.
@@ -18,8 +19,22 @@ Node.js Express API with Stripe and Supabase.
    - `npm install`
    - `npm run dev` (or `npm start`)
 
+## Test if backend is live (Vercel / any host)
+
+Use these URLs in the browser or with `curl` to confirm the API is running:
+
+| URL | Purpose |
+|-----|---------|
+| `https://YOUR-BACKEND.vercel.app/api` | Simple live check (returns `{ live: true, ... }`) |
+| `https://YOUR-BACKEND.vercel.app/api/live` | Same, explicit "live on Vercel" message |
+| `https://YOUR-BACKEND.vercel.app/api/health` | Health check `{ ok: true, ... }` |
+
+Example: `curl https://biomed-backend.vercel.app/api`
+
 ## Endpoints
 
+- `GET /api` – Live check (for testing deployment)
+- `GET /api/live` – Live check with message
 - `GET /api/health` – Health check
 - `GET /api/products` – Static product list
 - `POST /api/create-checkout-session` – Create Stripe Checkout session (body: `items`, `successUrl`, `cancelUrl`, `customerEmail`)
