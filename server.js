@@ -9,7 +9,7 @@ import { products, getProductById } from './products.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://biomedpharmas.com';
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@biomed.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
