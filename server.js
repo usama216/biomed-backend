@@ -14,29 +14,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@biomed.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-// Build allowed CORS origins: main frontend URL, its http/https counterpart, localhost, and extras (e.g. Vercel preview URLs)
-const allowedOrigins = new Set([
-  FRONTEND_URL,
-  FRONTEND_URL.replace(/^http:\/\//, 'https://'),
-  FRONTEND_URL.replace(/^https:\/\//, 'http://'),
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:3000',
-  ...(process.env.ADDITIONAL_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean),
-]);
-// Allow any *.vercel.app origin (preview deployments)
-const isVercelOrigin = (origin) => /^https?:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // same-origin or non-browser (e.g. curl)
-      if (allowedOrigins.has(origin) || isVercelOrigin(origin)) return cb(null, true);
-      cb(null, false);
-    },
-    credentials: true,
-  })
-);
+// Allow all domains (any origin can call the API)
+app.use(cors({ origin: true, credentials: true }));
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
