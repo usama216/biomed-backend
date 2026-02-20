@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import Stripe from 'stripe';
+import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
 import { products, getProductById } from './products.js';
 
@@ -14,6 +15,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@biomed.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
+const BANNERS_BUCKET = 'banners';
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+
 // Allow all domains (any origin can call the API)
 app.use(cors({ origin: true, credentials: true }));
 
@@ -21,7 +25,38 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (req, file, cb) => {
+    const allowed = /^image\/(jpeg|jpg|png|gif|webp)$/i.test(file.mimetype);
+    if (allowed) cb(null, true);
+    else cb(new Error('Only images (JPEG, PNG, GIF, WebP) are allowed'), false);
+  },
+});
+
 app.use(express.json());
+
+async function ensureBannersBucket() {
+  if (!supabase) return;
+  const { data: buckets } = await supabase.storage.listBuckets();
+  if (buckets && !buckets.find((b) => b.name === BANNERS_BUCKET)) {
+    await supabase.storage.createBucket(BANNERS_BUCKET, { public: true });
+  }
+}
+
+async function uploadBannerToStorage(file) {
+  await ensureBannersBucket();
+  const ext = (file.originalname && file.originalname.split('.').pop()) || 'jpg';
+  const path = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext.replace(/[^a-z0-9]/gi, '')}`;
+  const { data, error } = await supabase.storage
+    .from(BANNERS_BUCKET)
+    .upload(path, file.buffer, { contentType: file.mimetype || 'image/jpeg', upsert: false });
+  if (error) throw error;
+  const { data: urlData } = supabase.storage.from(BANNERS_BUCKET).getPublicUrl(data.path);
+  return urlData.publicUrl;
+}
 
 // Admin auth middleware: require Bearer token and valid JWT
 function requireAdmin(req, res, next) {
@@ -271,6 +306,133 @@ app.get('/api/admin/orders', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Admin orders error:', err);
     res.status(500).json({ error: err.message || 'Failed to load orders' });
+  }
+});
+
+// --- Banners (hero carousel) ---
+
+// Public: get all banners for hero
+app.get('/api/banners', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ banners: [] });
+    }
+    const { data, error } = await supabase
+      .from('banners')
+      .select('*')
+      .order('sort_order', { ascending: true });
+    if (error) {
+      console.error('Banners fetch error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ banners: data || [] });
+  } catch (err) {
+    console.error('Banners error:', err);
+    res.status(500).json({ banners: [] });
+  }
+});
+
+// Admin: list banners (protected)
+app.get('/api/admin/banners', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ banners: [] });
+    }
+    const { data, error } = await supabase
+      .from('banners')
+      .select('*')
+      .order('sort_order', { ascending: true });
+    if (error) {
+      console.error('Admin banners error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ banners: data || [] });
+  } catch (err) {
+    console.error('Admin banners error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load banners' });
+  }
+});
+
+// Admin: add banner with image upload (protected)
+app.post('/api/admin/banners', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'Image file is required. Upload an image.' });
+    }
+    const sort_order = req.body.sort_order != null ? parseInt(req.body.sort_order, 10) : 0;
+    const image_url = await uploadBannerToStorage(req.file);
+    const { data, error } = await supabase
+      .from('banners')
+      .insert({ image_url, sort_order })
+      .select()
+      .single();
+    if (error) {
+      console.error('Banner insert error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.status(201).json({ banner: data });
+  } catch (err) {
+    console.error('Banner create error:', err);
+    res.status(500).json({ error: err.message || 'Failed to create banner' });
+  }
+});
+
+// Admin: update banner – optional new image upload (protected)
+app.put('/api/admin/banners/:id', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const updates = {};
+    if (req.file) {
+      updates.image_url = await uploadBannerToStorage(req.file);
+    }
+    if (req.body.sort_order != null) {
+      updates.sort_order = parseInt(req.body.sort_order, 10);
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Provide a new image or sort_order to update' });
+    }
+    const { data, error } = await supabase
+      .from('banners')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) {
+      console.error('Banner update error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ error: 'Banner not found' });
+    }
+    res.json({ banner: data });
+  } catch (err) {
+    console.error('Banner update error:', err);
+    res.status(500).json({ error: err.message || 'Failed to update banner' });
+  }
+});
+
+// Admin: delete banner (protected)
+app.delete('/api/admin/banners/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const { error } = await supabase.from('banners').delete().eq('id', id);
+    if (error) {
+      console.error('Banner delete error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Banner delete error:', err);
+    res.status(500).json({ error: err.message || 'Failed to delete banner' });
   }
 });
 
