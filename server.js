@@ -7,6 +7,7 @@ import Stripe from 'stripe';
 import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
 import { products, getProductById } from './products.js';
+import { sendOrderEmails } from './email.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -209,6 +210,7 @@ app.post('/api/orders', async (req, res) => {
       console.error('Supabase insert error:', error.message, error.details);
       return res.json({ order: { id: session.id }, saved: false });
     }
+    sendOrderEmails(data).catch((e) => console.error('Order emails error:', e));
     res.json({ order: data });
   } catch (err) {
     console.error('Order save error:', err.message || err);
@@ -265,6 +267,7 @@ app.post('/api/orders/cod', async (req, res) => {
       console.error('COD order error:', error);
       return res.status(500).json({ error: error.message || 'Failed to place order' });
     }
+    sendOrderEmails(data).catch((e) => console.error('Order emails error:', e));
     res.json({ order: data });
   } catch (err) {
     console.error('COD order error:', err);
