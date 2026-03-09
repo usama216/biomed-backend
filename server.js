@@ -17,7 +17,9 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@biomed.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
 const BANNERS_BUCKET = 'banners';
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const BLOG_IMAGES_BUCKET = 'blog-images';
+// Max upload size for all images (banners, cover, inline blog images)
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 // Allow all domains (any origin can call the API)
 app.use(cors({ origin: true, credentials: true }));
@@ -45,6 +47,26 @@ async function ensureBannersBucket() {
   if (buckets && !buckets.find((b) => b.name === BANNERS_BUCKET)) {
     await supabase.storage.createBucket(BANNERS_BUCKET, { public: true });
   }
+}
+
+async function ensureBlogImagesBucket() {
+  if (!supabase) return;
+  const { data: buckets } = await supabase.storage.listBuckets();
+  if (buckets && !buckets.find((b) => b.name === BLOG_IMAGES_BUCKET)) {
+    await supabase.storage.createBucket(BLOG_IMAGES_BUCKET, { public: true });
+  }
+}
+
+async function uploadBlogImageToStorage(file) {
+  await ensureBlogImagesBucket();
+  const ext = (file.originalname && file.originalname.split('.').pop()) || 'jpg';
+  const path = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext.replace(/[^a-z0-9]/gi, '')}`;
+  const { data, error } = await supabase.storage
+    .from(BLOG_IMAGES_BUCKET)
+    .upload(path, file.buffer, { contentType: file.mimetype || 'image/jpeg', upsert: false });
+  if (error) throw error;
+  const { data: urlData } = supabase.storage.from(BLOG_IMAGES_BUCKET).getPublicUrl(data.path);
+  return urlData.publicUrl;
 }
 
 async function uploadBannerToStorage(file) {
@@ -437,6 +459,201 @@ app.delete('/api/admin/banners/:id', requireAdmin, async (req, res) => {
     console.error('Banner delete error:', err);
     res.status(500).json({ error: err.message || 'Failed to delete banner' });
   }
+});
+
+// --- Blogs ---
+
+// Public: list published blogs
+app.get('/api/blogs', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ blogs: [] });
+    }
+    const { data, error } = await supabase
+      .from('blogs')
+      .select('id, title, slug, excerpt, cover_image_url, category, read_time_minutes, created_at')
+      .eq('published', true)
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Blogs fetch error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ blogs: data || [] });
+  } catch (err) {
+    console.error('Blogs error:', err);
+    res.json({ blogs: [] });
+  }
+});
+
+// Public: get single blog by id or slug
+app.get('/api/blogs/:idOrSlug', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(404).json({ error: 'Blog not found' });
+    }
+    const { idOrSlug } = req.params;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrSlug);
+    const query = supabase
+      .from('blogs')
+      .select('*')
+      .eq('published', true);
+    if (isUuid) {
+      query.eq('id', idOrSlug);
+    } else {
+      query.eq('slug', idOrSlug);
+    }
+    const { data, error } = await query.single();
+    if (error || !data) {
+      return res.status(404).json({ error: 'Blog not found' });
+    }
+    res.json(data);
+  } catch (err) {
+    console.error('Blog get error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load blog' });
+  }
+});
+
+// Admin: list all blogs (including unpublished)
+app.get('/api/admin/blogs', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ blogs: [] });
+    }
+    const { data, error } = await supabase
+      .from('blogs')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Admin blogs error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ blogs: data || [] });
+  } catch (err) {
+    console.error('Admin blogs error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load blogs' });
+  }
+});
+
+// Admin: upload image for blog content (inline images) – returns { url }
+app.post('/api/admin/blogs/upload-image', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'Image file is required' });
+    }
+    const url = await uploadBlogImageToStorage(req.file);
+    res.json({ url });
+  } catch (err) {
+    console.error('Blog image upload error:', err);
+    res.status(500).json({ error: err.message || 'Failed to upload image' });
+  }
+});
+
+// Admin: create blog (multipart: title, excerpt, content, category, read_time_minutes, published, cover image)
+app.post('/api/admin/blogs', requireAdmin, upload.single('cover_image'), async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { title, excerpt, content, category, read_time_minutes, published } = req.body || {};
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    const slug = (String(title).trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'blog-' + Date.now()).slice(0, 200);
+    let cover_image_url = null;
+    if (req.file) {
+      cover_image_url = await uploadBlogImageToStorage(req.file);
+    }
+    const row = {
+      title: String(title).trim(),
+      slug,
+      excerpt: excerpt != null ? String(excerpt).trim() : null,
+      content: content != null ? String(content) : null,
+      cover_image_url,
+      category: category != null ? String(category).trim() || 'Health' : 'Health',
+      read_time_minutes: read_time_minutes != null ? parseInt(read_time_minutes, 10) || 5 : 5,
+      published: published === 'true' || published === true,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabase.from('blogs').insert(row).select().single();
+    if (error) {
+      console.error('Blog insert error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.status(201).json({ blog: data });
+  } catch (err) {
+    console.error('Blog create error:', err);
+    res.status(500).json({ error: err.message || 'Failed to create blog' });
+  }
+});
+
+// Admin: update blog
+app.put('/api/admin/blogs/:id', requireAdmin, upload.single('cover_image'), async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const { title, excerpt, content, category, read_time_minutes, published } = req.body || {};
+    const updates = { updated_at: new Date().toISOString() };
+    if (title !== undefined) updates.title = String(title).trim();
+    if (excerpt !== undefined) updates.excerpt = String(excerpt).trim();
+    if (content !== undefined) updates.content = String(content);
+    if (category !== undefined) updates.category = String(category).trim() || 'Health';
+    if (read_time_minutes !== undefined) updates.read_time_minutes = parseInt(read_time_minutes, 10) || 5;
+    if (published !== undefined) updates.published = published === 'true' || published === true;
+    if (req.file) {
+      updates.cover_image_url = await uploadBlogImageToStorage(req.file);
+    }
+    if (Object.keys(updates).length <= 1) {
+      return res.status(400).json({ error: 'Provide at least one field to update' });
+    }
+    const { data, error } = await supabase.from('blogs').update(updates).eq('id', id).select().single();
+    if (error) {
+      console.error('Blog update error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ error: 'Blog not found' });
+    }
+    res.json({ blog: data });
+  } catch (err) {
+    console.error('Blog update error:', err);
+    res.status(500).json({ error: err.message || 'Failed to update blog' });
+  }
+});
+
+// Admin: delete blog
+app.delete('/api/admin/blogs/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const { error } = await supabase.from('blogs').delete().eq('id', id);
+    if (error) {
+      console.error('Blog delete error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Blog delete error:', err);
+    res.status(500).json({ error: err.message || 'Failed to delete blog' });
+  }
+});
+
+// Multer (file upload) error handler – return clean JSON instead of HTML
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'Image too large. Max 10MB.' });
+    }
+    console.error('Multer error:', err);
+    return res.status(400).json({ error: err.message || 'Upload error' });
+  }
+  next(err);
 });
 
 app.listen(PORT, () => {
