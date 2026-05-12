@@ -30,6 +30,9 @@ create table if not exists public.products (
 );
 
 -- 2. Add any missing columns to an already-existing table
+alter table public.products add column if not exists name text;
+alter table public.products add column if not exists original_price numeric;
+alter table public.products add column if not exists discounted_price numeric;
 alter table public.products add column if not exists image text not null default '';
 alter table public.products add column if not exists images jsonb not null default '[]'::jsonb;
 alter table public.products add column if not exists description text default '';
@@ -47,6 +50,32 @@ alter table public.products add column if not exists ingredients jsonb not null 
 alter table public.products add column if not exists sort_order int not null default 0;
 alter table public.products add column if not exists created_at timestamptz not null default now();
 alter table public.products add column if not exists updated_at timestamptz not null default now();
+
+-- 2.1 Backfill snake_case prices from legacy camelCase columns if they exist
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'products' and column_name = 'originalPrice'
+  ) then
+    execute 'update public.products set original_price = coalesce(original_price, "originalPrice")';
+  end if;
+
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'products' and column_name = 'discountedPrice'
+  ) then
+    execute 'update public.products set discounted_price = coalesce(discounted_price, "discountedPrice")';
+  end if;
+end $$;
+
+-- 2.2 Ensure required values exist for API writes
+update public.products
+set original_price = coalesce(original_price, discounted_price, 0),
+    discounted_price = coalesce(discounted_price, original_price, 0),
+    name = coalesce(name, id);
 
 -- 3. Enable RLS
 alter table public.products enable row level security;
