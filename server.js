@@ -7,6 +7,13 @@ import Stripe from 'stripe';
 import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
 import { products, getProductById } from './products.js';
+import {
+  dbRowToApiProduct,
+  normalizeCategoryForDb,
+  parseHelpsFromForm,
+  parseIngredientsFromForm,
+} from './productDb.js';
+import { SEED_PRODUCT_ROWS } from './seed-products-data.mjs';
 import { sendOrderEmails } from './email.js';
 
 const app = express();
@@ -18,6 +25,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
 const BANNERS_BUCKET = 'banners';
 const BLOG_IMAGES_BUCKET = 'blog-images';
+const PRODUCT_IMAGES_BUCKET = 'product-images';
 // Max upload size for all images (banners, cover, inline blog images)
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -57,6 +65,14 @@ async function ensureBlogImagesBucket() {
   }
 }
 
+async function ensureProductImagesBucket() {
+  if (!supabase) return;
+  const { data: buckets } = await supabase.storage.listBuckets();
+  if (buckets && !buckets.find((b) => b.name === PRODUCT_IMAGES_BUCKET)) {
+    await supabase.storage.createBucket(PRODUCT_IMAGES_BUCKET, { public: true });
+  }
+}
+
 async function uploadBlogImageToStorage(file) {
   await ensureBlogImagesBucket();
   const ext = (file.originalname && file.originalname.split('.').pop()) || 'jpg';
@@ -78,6 +94,18 @@ async function uploadBannerToStorage(file) {
     .upload(path, file.buffer, { contentType: file.mimetype || 'image/jpeg', upsert: false });
   if (error) throw error;
   const { data: urlData } = supabase.storage.from(BANNERS_BUCKET).getPublicUrl(data.path);
+  return urlData.publicUrl;
+}
+
+async function uploadProductImageToStorage(file) {
+  await ensureProductImagesBucket();
+  const ext = (file.originalname && file.originalname.split('.').pop()) || 'jpg';
+  const path = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext.replace(/[^a-z0-9]/gi, '')}`;
+  const { data, error } = await supabase.storage
+    .from(PRODUCT_IMAGES_BUCKET)
+    .upload(path, file.buffer, { contentType: file.mimetype || 'image/jpeg', upsert: false });
+  if (error) throw error;
+  const { data: urlData } = supabase.storage.from(PRODUCT_IMAGES_BUCKET).getPublicUrl(data.path);
   return urlData.publicUrl;
 }
 
@@ -112,10 +140,66 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, message: 'BioMed API running' });
 });
 
-// Static products (for consistency with frontend)
-app.get('/api/products', (req, res) => {
-  res.json(products);
+function seededApiProducts() {
+  return SEED_PRODUCT_ROWS.map(dbRowToApiProduct);
+}
+
+// Product catalog (Supabase when configured and non-empty; otherwise in-memory seed for local dev)
+app.get('/api/products', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ products: seededApiProducts() });
+    }
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .order('id', { ascending: true });
+    if (error) {
+      console.error('Products fetch error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data?.length) {
+      return res.json({ products: [] });
+    }
+    res.json({ products: data.map(dbRowToApiProduct) });
+  } catch (err) {
+    console.error('Products error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load products' });
+  }
 });
+
+// Single product (DB first, then seed fallback)
+app.get('/api/products/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let row = null;
+    if (supabase) {
+      const { data, error } = await supabase.from('products').select('*').eq('id', id).maybeSingle();
+      if (!error) row = data;
+    }
+    if (!row) {
+      row = SEED_PRODUCT_ROWS.find((r) => r.id === id) || null;
+    }
+    if (!row) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    res.json(dbRowToApiProduct(row));
+  } catch (err) {
+    console.error('Product get error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load product' });
+  }
+});
+
+async function fetchProductRowsForCheckout(ids) {
+  const unique = [...new Set((ids || []).filter(Boolean))];
+  if (!supabase || unique.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('products')
+    .select('id,name,original_price,discounted_price,image')
+    .in('id', unique);
+  if (error || !data) return new Map();
+  return new Map(data.map((r) => [r.id, r]));
+}
 
 // Stripe metadata values max 500 chars
 const meta = (v) => (v != null && String(v).length > 0 ? String(v).slice(0, 500) : undefined);
@@ -131,10 +215,18 @@ app.post('/api/create-checkout-session', async (req, res) => {
     const customerEmail = cust.email || undefined;
 
     const lineItems = [];
+    const checkoutIds = items.map((i) => i.id);
+    const dbProductMap = await fetchProductRowsForCheckout(checkoutIds);
     for (const item of items) {
-      const product = getProductById(item.id);
-      const price = product ? product.discountedPrice : (item.discountedPrice ?? item.price);
-      const name = product ? product.name : item.name;
+      const row = dbProductMap.get(item.id);
+      const staticP = getProductById(item.id);
+      const price = row
+        ? Number(row.discounted_price)
+        : staticP
+          ? staticP.discountedPrice
+          : item.discountedPrice ?? item.price;
+      const name = row ? row.name : staticP ? staticP.name : item.name;
+      const imagePath = row ? row.image : staticP ? staticP.image : item.image;
       const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
       // Stripe amounts in smallest unit: PKR uses paise (1 PKR = 100 paise)
       lineItems.push({
@@ -142,7 +234,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
           currency: 'pkr',
           product_data: {
             name,
-            images: item.image ? [new URL(item.image, FRONTEND_URL).href] : undefined,
+            images: imagePath ? [new URL(imagePath, FRONTEND_URL).href] : undefined,
           },
           unit_amount: Math.round(price * 100), // per unit in paise
         },
@@ -331,6 +423,155 @@ app.get('/api/admin/orders', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Admin orders error:', err);
     res.status(500).json({ error: err.message || 'Failed to load orders' });
+  }
+});
+
+// --- Products (admin CRUD) ---
+
+// Admin: list products
+app.get('/api/admin/products', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ products: seededApiProducts() });
+    }
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .order('id', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ products: (data || []).map(dbRowToApiProduct) });
+  } catch (err) {
+    console.error('Admin products error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load products' });
+  }
+});
+
+// Admin: upload product image (returns { url })
+app.post('/api/admin/products/upload-image', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+    if (!req.file) return res.status(400).json({ error: 'Image file is required' });
+    const url = await uploadProductImageToStorage(req.file);
+    res.json({ url });
+  } catch (err) {
+    console.error('Product image upload error:', err);
+    res.status(500).json({ error: err.message || 'Failed to upload image' });
+  }
+});
+
+function productRowFromBodyOrMultipart(req, existing) {
+  const b = req.body || {};
+  const base = existing ? { ...existing } : {};
+
+  if (b.name !== undefined) base.name = String(b.name).trim();
+  if (b.original_price !== undefined) base.original_price = Number(b.original_price);
+  if (b.discounted_price !== undefined) base.discounted_price = Number(b.discounted_price);
+  if (b.description !== undefined) base.description = String(b.description);
+  if (b.rating !== undefined) base.rating = Number(b.rating);
+  if (b.reviews !== undefined) base.reviews = parseInt(b.reviews, 10) || 0;
+  if (b.questions !== undefined) base.questions = parseInt(b.questions, 10) || 0;
+  if (b.in_stock !== undefined) base.in_stock = b.in_stock === 'true' || b.in_stock === true;
+  if (b.category !== undefined) {
+    try {
+      base.category = normalizeCategoryForDb(JSON.parse(b.category));
+    } catch {
+      base.category = normalizeCategoryForDb(b.category);
+    }
+  }
+  if (b.pack_size !== undefined) base.pack_size = String(b.pack_size);
+  if (b.wellness_coins !== undefined) base.wellness_coins = parseInt(b.wellness_coins, 10) || 0;
+  if (b.helps !== undefined) base.helps = parseHelpsFromForm(b.helps);
+  if (b.details !== undefined) base.details = String(b.details);
+  if (b.directions !== undefined) base.directions = String(b.directions);
+  if (b.ingredients !== undefined) base.ingredients = parseIngredientsFromForm(b.ingredients);
+  if (b.images !== undefined) {
+    try {
+      const parsed = JSON.parse(b.images);
+      base.images = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      base.images = [];
+    }
+  }
+  if (b.sort_order !== undefined) base.sort_order = parseInt(b.sort_order, 10) || 0;
+
+  return base;
+}
+
+// Admin: create product (multipart form)
+app.post('/api/admin/products', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+
+    const { id } = req.body || {};
+    if (!id || !String(id).trim()) return res.status(400).json({ error: 'id is required' });
+
+    const row = productRowFromBodyOrMultipart(req, {
+      id: String(id).trim(),
+      in_stock: true,
+      category: ['Best Selling'],
+      images: [],
+      helps: [],
+      ingredients: [],
+    });
+
+    if (!row.name) return res.status(400).json({ error: 'name is required' });
+    if (!Number.isFinite(Number(row.original_price))) return res.status(400).json({ error: 'original_price is required' });
+    if (!Number.isFinite(Number(row.discounted_price))) return res.status(400).json({ error: 'discounted_price is required' });
+
+    if (req.file) {
+      row.image = await uploadProductImageToStorage(req.file);
+      row.images = [row.image];
+    }
+
+    row.updated_at = new Date().toISOString();
+    const { data, error } = await supabase.from('products').insert(row).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.status(201).json({ product: dbRowToApiProduct(data) });
+  } catch (err) {
+    console.error('Product create error:', err);
+    res.status(500).json({ error: err.message || 'Failed to create product' });
+  }
+});
+
+// Admin: update product (multipart form; optional new image)
+app.put('/api/admin/products/:id', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+
+    const { id } = req.params;
+    const updates = productRowFromBodyOrMultipart(req, {});
+
+    if (req.file) {
+      updates.image = await uploadProductImageToStorage(req.file);
+      updates.images = [updates.image];
+    }
+    updates.updated_at = new Date().toISOString();
+
+    if (Object.keys(updates).length <= 1) {
+      return res.status(400).json({ error: 'Provide at least one field to update' });
+    }
+
+    const { data, error } = await supabase.from('products').update(updates).eq('id', id).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Product not found' });
+    res.json({ product: dbRowToApiProduct(data) });
+  } catch (err) {
+    console.error('Product update error:', err);
+    res.status(500).json({ error: err.message || 'Failed to update product' });
+  }
+});
+
+// Admin: delete product
+app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+    const { id } = req.params;
+    const { error } = await supabase.from('products').delete().eq('id', id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Product delete error:', err);
+    res.status(500).json({ error: err.message || 'Failed to delete product' });
   }
 });
 
