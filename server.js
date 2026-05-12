@@ -497,8 +497,8 @@ function productRowFromBodyOrMultipart(req, existing) {
   return base;
 }
 
-// Admin: create product (multipart form)
-app.post('/api/admin/products', requireAdmin, upload.single('image'), async (req, res) => {
+// Admin: create product (multipart fields only — images are URLs from /upload-image or static paths)
+app.post('/api/admin/products', requireAdmin, upload.none(), async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: 'Database not configured' });
 
@@ -518,9 +518,12 @@ app.post('/api/admin/products', requireAdmin, upload.single('image'), async (req
     if (!Number.isFinite(Number(row.original_price))) return res.status(400).json({ error: 'original_price is required' });
     if (!Number.isFinite(Number(row.discounted_price))) return res.status(400).json({ error: 'discounted_price is required' });
 
-    if (req.file) {
-      row.image = await uploadProductImageToStorage(req.file);
-      row.images = [row.image];
+    if (!Array.isArray(row.images)) row.images = [];
+    row.images = row.images.map((u) => String(u || '').trim()).filter(Boolean);
+    if (row.images.length > 0) {
+      row.image = row.images[0];
+    } else {
+      row.image = row.image != null ? String(row.image) : '';
     }
 
     row.updated_at = new Date().toISOString();
@@ -533,17 +536,20 @@ app.post('/api/admin/products', requireAdmin, upload.single('image'), async (req
   }
 });
 
-// Admin: update product (multipart form; optional new image)
-app.put('/api/admin/products/:id', requireAdmin, upload.single('image'), async (req, res) => {
+// Admin: update product (multipart fields — images is JSON array of URLs)
+app.put('/api/admin/products/:id', requireAdmin, upload.none(), async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: 'Database not configured' });
 
     const { id } = req.params;
     const updates = productRowFromBodyOrMultipart(req, {});
 
-    if (req.file) {
-      updates.image = await uploadProductImageToStorage(req.file);
-      updates.images = [updates.image];
+    if (updates.images !== undefined) {
+      const urls = Array.isArray(updates.images)
+        ? updates.images.map((u) => String(u || '').trim()).filter(Boolean)
+        : [];
+      updates.images = urls;
+      updates.image = urls.length > 0 ? urls[0] : '';
     }
     updates.updated_at = new Date().toISOString();
 
