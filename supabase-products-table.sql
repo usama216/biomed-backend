@@ -51,25 +51,86 @@ alter table public.products add column if not exists sort_order int not null def
 alter table public.products add column if not exists created_at timestamptz not null default now();
 alter table public.products add column if not exists updated_at timestamptz not null default now();
 
--- 2.1 Backfill snake_case prices from legacy camelCase columns if they exist
+-- 2.1 Backfill snake_case from legacy quoted camelCase columns (if present), then drop legacy cols
 do $$
 begin
   if exists (
     select 1
-    from information_schema.columns
-    where table_schema = 'public' and table_name = 'products' and column_name = 'originalPrice'
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public'
+      and c.relname = 'products'
+      and a.attname = 'originalPrice'
+      and a.attnum > 0
+      and not a.attisdropped
   ) then
     execute 'update public.products set original_price = coalesce(original_price, "originalPrice")';
   end if;
 
   if exists (
     select 1
-    from information_schema.columns
-    where table_schema = 'public' and table_name = 'products' and column_name = 'discountedPrice'
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public'
+      and c.relname = 'products'
+      and a.attname = 'discountedPrice'
+      and a.attnum > 0
+      and not a.attisdropped
   ) then
     execute 'update public.products set discounted_price = coalesce(discounted_price, "discountedPrice")';
   end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public'
+      and c.relname = 'products'
+      and a.attname = 'inStock'
+      and a.attnum > 0
+      and not a.attisdropped
+  ) then
+    execute 'update public.products set in_stock = coalesce(in_stock, "inStock")';
+  end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public'
+      and c.relname = 'products'
+      and a.attname = 'packSize'
+      and a.attnum > 0
+      and not a.attisdropped
+  ) then
+    execute 'update public.products set pack_size = coalesce(pack_size, "packSize")';
+  end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public'
+      and c.relname = 'products'
+      and a.attname = 'wellnessCoins'
+      and a.attnum > 0
+      and not a.attisdropped
+  ) then
+    execute 'update public.products set wellness_coins = coalesce(wellness_coins, "wellnessCoins")';
+  end if;
 end $$;
+
+-- Drop legacy camelCase columns so only snake_case remains (PostgREST / app use snake_case)
+alter table public.products drop column if exists "originalPrice";
+alter table public.products drop column if exists "discountedPrice";
+alter table public.products drop column if exists "inStock";
+alter table public.products drop column if exists "packSize";
+alter table public.products drop column if exists "wellnessCoins";
 
 -- 2.2 Ensure required values exist for API writes
 update public.products

@@ -9,6 +9,7 @@ import { createClient } from '@supabase/supabase-js';
 import { products, getProductById } from './products.js';
 import {
   dbRowToApiProduct,
+  mergeLegacyProductColumnsForWrite,
   normalizeCategoryForDb,
   parseHelpsFromForm,
   parseIngredientsFromForm,
@@ -527,7 +528,8 @@ app.post('/api/admin/products', requireAdmin, upload.none(), async (req, res) =>
     }
 
     row.updated_at = new Date().toISOString();
-    const { data, error } = await supabase.from('products').insert(row).select().single();
+    const rowForDb = mergeLegacyProductColumnsForWrite(row);
+    const { data, error } = await supabase.from('products').insert(rowForDb).select().single();
     if (error) return res.status(500).json({ error: error.message });
     res.status(201).json({ product: dbRowToApiProduct(data) });
   } catch (err) {
@@ -557,7 +559,8 @@ app.put('/api/admin/products/:id', requireAdmin, upload.none(), async (req, res)
       return res.status(400).json({ error: 'Provide at least one field to update' });
     }
 
-    const { data, error } = await supabase.from('products').update(updates).eq('id', id).select().single();
+    const updatesForDb = mergeLegacyProductColumnsForWrite(updates);
+    const { data, error } = await supabase.from('products').update(updatesForDb).eq('id', id).select().single();
     if (error) return res.status(500).json({ error: error.message });
     if (!data) return res.status(404).json({ error: 'Product not found' });
     res.json({ product: dbRowToApiProduct(data) });
