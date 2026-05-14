@@ -50,24 +50,6 @@ export function dbRowToApiProduct(row) {
   };
 }
 
-/** Old Supabase tables used quoted camelCase columns; mirror snake_case so NOT NULL legacy cols stay satisfied. */
-export function mergeLegacyProductColumnsForWrite(row) {
-  if (!row || typeof row !== 'object') return row;
-  const out = { ...row };
-  if (out.original_price != null && Number.isFinite(Number(out.original_price))) {
-    out.originalPrice = Number(out.original_price);
-  }
-  if (out.discounted_price != null && Number.isFinite(Number(out.discounted_price))) {
-    out.discountedPrice = Number(out.discounted_price);
-  }
-  if (out.in_stock !== undefined) out.inStock = !!out.in_stock;
-  if (out.pack_size !== undefined) out.packSize = String(out.pack_size ?? '');
-  if (out.wellness_coins !== undefined && out.wellness_coins !== null && out.wellness_coins !== '') {
-    out.wellnessCoins = Number(out.wellness_coins);
-  }
-  return out;
-}
-
 export function normalizeCategoryForDb(input) {
   if (input == null || input === '') return ['Best Selling'];
   if (Array.isArray(input)) return input.length ? input : ['Best Selling'];
