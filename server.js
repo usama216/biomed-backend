@@ -891,6 +891,203 @@ app.delete('/api/admin/blogs/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// --- Product Reviews ---
+
+async function syncProductReviewStats(productId) {
+  if (!supabase || !productId) return;
+  const { data, error } = await supabase
+    .from('product_reviews')
+    .select('rating')
+    .eq('product_id', productId)
+    .eq('approved', true);
+  if (error) {
+    console.error('Review stats fetch error:', error);
+    return;
+  }
+  const rows = data || [];
+  const count = rows.length;
+  const avg = count
+    ? Math.round((rows.reduce((sum, r) => sum + Number(r.rating || 0), 0) / count) * 10) / 10
+    : 0;
+  const { error: updateError } = await supabase
+    .from('products')
+    .update({ reviews: count, rating: avg, updated_at: new Date().toISOString() })
+    .eq('id', productId);
+  if (updateError) {
+    console.error('Review stats update error:', updateError);
+  }
+}
+
+// Public: approved reviews for a product
+app.get('/api/products/:id/reviews', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ reviews: [] });
+    }
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('product_reviews')
+      .select('id, product_id, author_name, rating, body, created_at')
+      .eq('product_id', id)
+      .eq('approved', true)
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Product reviews fetch error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ reviews: data || [] });
+  } catch (err) {
+    console.error('Product reviews error:', err);
+    res.json({ reviews: [] });
+  }
+});
+
+// Public: submit a review (pending admin approval)
+app.post('/api/products/:id/reviews', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const { author_name, author_email, rating, body } = req.body || {};
+    const name = author_name != null ? String(author_name).trim() : '';
+    const comment = body != null ? String(body).trim() : '';
+    const stars = parseInt(rating, 10);
+
+    if (!name) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    if (!comment) {
+      return res.status(400).json({ error: 'Review text is required' });
+    }
+    if (!Number.isFinite(stars) || stars < 1 || stars > 5) {
+      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    }
+
+    // Ensure product exists (DB or seed)
+    let productExists = false;
+    const { data: productRow } = await supabase.from('products').select('id').eq('id', id).maybeSingle();
+    if (productRow) productExists = true;
+    else if (SEED_PRODUCT_ROWS.some((r) => r.id === id)) productExists = true;
+    if (!productExists) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const row = {
+      product_id: id,
+      author_name: name.slice(0, 120),
+      author_email: author_email != null ? String(author_email).trim().slice(0, 200) || null : null,
+      rating: stars,
+      body: comment.slice(0, 2000),
+      approved: false,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase.from('product_reviews').insert(row).select('id').single();
+    if (error) {
+      console.error('Review insert error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.status(201).json({
+      success: true,
+      message: 'Review submitted. It will appear after admin approval.',
+      review: { id: data.id },
+    });
+  } catch (err) {
+    console.error('Review create error:', err);
+    res.status(500).json({ error: err.message || 'Failed to submit review' });
+  }
+});
+
+// Admin: list all reviews
+app.get('/api/admin/reviews', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ reviews: [] });
+    }
+    const { data, error } = await supabase
+      .from('product_reviews')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Admin reviews error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ reviews: data || [] });
+  } catch (err) {
+    console.error('Admin reviews error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load reviews' });
+  }
+});
+
+// Admin: approve / reject review
+app.put('/api/admin/reviews/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const { approved } = req.body || {};
+    if (approved === undefined) {
+      return res.status(400).json({ error: 'approved is required' });
+    }
+    const updates = {
+      approved: approved === true || approved === 'true',
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabase
+      .from('product_reviews')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) {
+      console.error('Review update error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
+    await syncProductReviewStats(data.product_id);
+    res.json({ review: data });
+  } catch (err) {
+    console.error('Review update error:', err);
+    res.status(500).json({ error: err.message || 'Failed to update review' });
+  }
+});
+
+// Admin: delete review
+app.delete('/api/admin/reviews/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' });
+    }
+    const { id } = req.params;
+    const { data: existing, error: fetchError } = await supabase
+      .from('product_reviews')
+      .select('id, product_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (fetchError) {
+      console.error('Review fetch before delete error:', fetchError);
+      return res.status(500).json({ error: fetchError.message });
+    }
+    if (!existing) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
+    const { error } = await supabase.from('product_reviews').delete().eq('id', id);
+    if (error) {
+      console.error('Review delete error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    await syncProductReviewStats(existing.product_id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Review delete error:', err);
+    res.status(500).json({ error: err.message || 'Failed to delete review' });
+  }
+});
+
 // Multer (file upload) error handler – return clean JSON instead of HTML
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
