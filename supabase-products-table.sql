@@ -24,6 +24,7 @@ create table if not exists public.products (
   details text default '',
   directions text default '',
   ingredients jsonb not null default '[]'::jsonb,
+  faqs jsonb not null default '[]'::jsonb,
   sort_order int not null default 0,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -47,6 +48,7 @@ alter table public.products add column if not exists helps jsonb not null defaul
 alter table public.products add column if not exists details text default '';
 alter table public.products add column if not exists directions text default '';
 alter table public.products add column if not exists ingredients jsonb not null default '[]'::jsonb;
+alter table public.products add column if not exists faqs jsonb not null default '[]'::jsonb;
 alter table public.products add column if not exists sort_order int not null default 0;
 alter table public.products add column if not exists created_at timestamptz not null default now();
 alter table public.products add column if not exists updated_at timestamptz not null default now();

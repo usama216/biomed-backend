@@ -12,6 +12,7 @@ import {
   normalizeCategoryForDb,
   parseHelpsFromForm,
   parseIngredientsFromForm,
+  parseFaqsFromForm,
 } from './productDb.js';
 import { SEED_PRODUCT_ROWS } from './seed-products-data.mjs';
 import { sendOrderEmails } from './email.js';
@@ -484,6 +485,7 @@ function productRowFromBodyOrMultipart(req, existing) {
   if (b.details !== undefined) base.details = String(b.details);
   if (b.directions !== undefined) base.directions = String(b.directions);
   if (b.ingredients !== undefined) base.ingredients = parseIngredientsFromForm(b.ingredients);
+  if (b.faqs !== undefined) base.faqs = parseFaqsFromForm(b.faqs);
   if (b.images !== undefined) {
     try {
       const parsed = JSON.parse(b.images);
@@ -512,6 +514,7 @@ app.post('/api/admin/products', requireAdmin, upload.none(), async (req, res) =>
       images: [],
       helps: [],
       ingredients: [],
+      faqs: [],
     });
 
     if (!row.name) return res.status(400).json({ error: 'name is required' });

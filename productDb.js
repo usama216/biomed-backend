@@ -46,6 +46,7 @@ export function dbRowToApiProduct(row) {
     details: row.details || '',
     directions: row.directions || '',
     ingredients: Array.isArray(row.ingredients) ? row.ingredients : [],
+    faqs: Array.isArray(row.faqs) ? row.faqs : [],
     sort_order: row.sort_order ?? 0,
   };
 }
@@ -76,4 +77,26 @@ export function parseIngredientsFromForm(text) {
   } catch {
     return [];
   }
+}
+
+export function parseFaqsFromForm(text) {
+  if (text == null || text === '') return [];
+  let parsed = text;
+  if (typeof text === 'string') {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const question = String(item.question || '').trim();
+      const answer = String(item.answer || '').trim();
+      if (!question || !answer) return null;
+      return { question, answer };
+    })
+    .filter(Boolean);
 }
