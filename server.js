@@ -340,7 +340,7 @@ app.post('/api/orders', async (req, res) => {
 // Cash on Delivery: create order without Stripe
 app.post('/api/orders/cod', async (req, res) => {
   try {
-    const { items, customer } = req.body;
+    const { items, customer, promo_code: promoCodeRaw } = req.body;
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Cart items are required' });
     }
@@ -356,14 +356,29 @@ app.post('/api/orders/cod', async (req, res) => {
       amountTotal += price * qty;
       return { id: i.id, name: i.name, quantity: qty, price };
     });
-    const amountTotalPaise = Math.round(amountTotal * 100);
+
+    let promoDiscount = 0;
+    let appliedPromoCode = null;
+    let promoRow = null;
+    if (promoCodeRaw && String(promoCodeRaw).trim()) {
+      const applied = await applyPromoToSubtotal(String(promoCodeRaw).trim(), amountTotal);
+      if (!applied.ok) {
+        return res.status(400).json({ error: applied.error });
+      }
+      promoDiscount = applied.discount;
+      appliedPromoCode = applied.code;
+      promoRow = applied.row;
+    }
+
+    const finalTotal = Math.max(0, amountTotal - promoDiscount);
+    const amountTotalPaise = Math.round(finalTotal * 100);
 
     if (!supabase) {
       return res.status(503).json({ error: 'Orders temporarily unavailable' });
     }
 
     const codSessionId = 'cod_' + crypto.randomUUID();
-    const { data, error } = await supabase.from('orders').insert({
+    const insertRow = {
       stripe_session_id: codSessionId,
       customer_email: cust.email.trim(),
       customer_name: cust.name.trim(),
@@ -376,12 +391,33 @@ app.post('/api/orders/cod', async (req, res) => {
       currency: 'pkr',
       items: orderItems,
       status: 'cod',
-    }).select().single();
+      promo_code: appliedPromoCode,
+      promo_discount: promoDiscount,
+    };
+
+    let { data, error } = await supabase.from('orders').insert(insertRow).select().single();
+    // If promo columns don't exist yet, retry without them
+    if (error && /promo_code|promo_discount/i.test(error.message || '')) {
+      delete insertRow.promo_code;
+      delete insertRow.promo_discount;
+      ({ data, error } = await supabase.from('orders').insert(insertRow).select().single());
+    }
 
     if (error) {
       console.error('COD order error:', error);
       return res.status(500).json({ error: error.message || 'Failed to place order' });
     }
+
+    if (promoRow?.id) {
+      await supabase
+        .from('promo_codes')
+        .update({
+          used_count: Number(promoRow.used_count || 0) + 1,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', promoRow.id);
+    }
+
     sendOrderEmails(data).catch((e) => console.error('Order emails error:', e));
     res.json({ order: data });
   } catch (err) {
@@ -1088,6 +1124,249 @@ app.delete('/api/admin/reviews/:id', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Review delete error:', err);
     res.status(500).json({ error: err.message || 'Failed to delete review' });
+  }
+});
+
+// --- Promo Codes ---
+
+function normalizePromoCode(code) {
+  return String(code || '').trim().toUpperCase();
+}
+
+function computePromoDiscount(row, subtotal) {
+  const total = Math.max(0, Number(subtotal) || 0);
+  const value = Number(row.discount_value) || 0;
+  if (row.discount_type === 'fixed') {
+    return Math.min(total, Math.round(value));
+  }
+  // percent
+  const pct = Math.min(100, Math.max(0, value));
+  return Math.min(total, Math.round(total * (pct / 100)));
+}
+
+async function fetchPromoByCode(code) {
+  if (!supabase) return null;
+  const normalized = normalizePromoCode(code);
+  if (!normalized) return null;
+  const { data, error } = await supabase
+    .from('promo_codes')
+    .select('*')
+    .eq('code', normalized)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data;
+}
+
+async function applyPromoToSubtotal(code, subtotal) {
+  const row = await fetchPromoByCode(code);
+  if (!row) return { ok: false, error: 'Invalid promo code' };
+  if (!row.active) return { ok: false, error: 'This promo code is inactive' };
+  if (row.expires_at && new Date(row.expires_at) < new Date()) {
+    return { ok: false, error: 'This promo code has expired' };
+  }
+  if (row.max_uses != null && Number(row.used_count || 0) >= Number(row.max_uses)) {
+    return { ok: false, error: 'This promo code has reached its usage limit' };
+  }
+  const minOrder = Number(row.min_order_amount || 0);
+  const total = Math.max(0, Number(subtotal) || 0);
+  if (total < minOrder) {
+    return { ok: false, error: `Minimum order amount for this code is Rs. ${minOrder}` };
+  }
+  const discount = computePromoDiscount(row, total);
+  if (discount <= 0) return { ok: false, error: 'Promo code cannot be applied to this order' };
+  return {
+    ok: true,
+    code: normalizePromoCode(row.code),
+    discount,
+    final_total: Math.max(0, total - discount),
+    discount_type: row.discount_type,
+    discount_value: Number(row.discount_value),
+    row,
+  };
+}
+
+// Public: validate promo code against cart subtotal
+app.post('/api/promo-codes/validate', async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(503).json({ error: 'Promo codes temporarily unavailable' });
+    }
+    const { code, subtotal } = req.body || {};
+    if (!code || !String(code).trim()) {
+      return res.status(400).json({ error: 'Promo code is required' });
+    }
+    const applied = await applyPromoToSubtotal(code, subtotal);
+    if (!applied.ok) {
+      return res.status(400).json({ error: applied.error });
+    }
+    res.json({
+      valid: true,
+      code: applied.code,
+      discount: applied.discount,
+      final_total: applied.final_total,
+      discount_type: applied.discount_type,
+      discount_value: applied.discount_value,
+    });
+  } catch (err) {
+    console.error('Promo validate error:', err);
+    res.status(500).json({ error: err.message || 'Failed to validate promo code' });
+  }
+});
+
+// Admin: list promo codes
+app.get('/api/admin/promo-codes', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) return res.json({ promo_codes: [] });
+    const { data, error } = await supabase
+      .from('promo_codes')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Admin promo codes error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ promo_codes: data || [] });
+  } catch (err) {
+    console.error('Admin promo codes error:', err);
+    res.status(500).json({ error: err.message || 'Failed to load promo codes' });
+  }
+});
+
+// Admin: create promo code
+app.post('/api/admin/promo-codes', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+    const {
+      code,
+      discount_type = 'percent',
+      discount_value,
+      min_order_amount = 0,
+      max_uses,
+      active = true,
+      expires_at,
+    } = req.body || {};
+
+    const normalized = normalizePromoCode(code);
+    if (!normalized) return res.status(400).json({ error: 'Code is required' });
+    if (!['percent', 'fixed'].includes(discount_type)) {
+      return res.status(400).json({ error: 'discount_type must be percent or fixed' });
+    }
+    const value = Number(discount_value);
+    if (!Number.isFinite(value) || value <= 0) {
+      return res.status(400).json({ error: 'discount_value must be greater than 0' });
+    }
+    if (discount_type === 'percent' && value > 100) {
+      return res.status(400).json({ error: 'Percent discount cannot exceed 100' });
+    }
+
+    const row = {
+      code: normalized,
+      discount_type,
+      discount_value: value,
+      min_order_amount: Math.max(0, Number(min_order_amount) || 0),
+      max_uses: max_uses === '' || max_uses == null ? null : parseInt(max_uses, 10),
+      active: active === true || active === 'true',
+      expires_at: expires_at ? new Date(expires_at).toISOString() : null,
+      updated_at: new Date().toISOString(),
+    };
+    if (row.max_uses != null && (!Number.isFinite(row.max_uses) || row.max_uses < 1)) {
+      return res.status(400).json({ error: 'max_uses must be a positive number or empty' });
+    }
+
+    const { data, error } = await supabase.from('promo_codes').insert(row).select().single();
+    if (error) {
+      console.error('Promo create error:', error);
+      if (/duplicate|unique/i.test(error.message || '')) {
+        return res.status(400).json({ error: 'This promo code already exists' });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+    res.status(201).json({ promo_code: data });
+  } catch (err) {
+    console.error('Promo create error:', err);
+    res.status(500).json({ error: err.message || 'Failed to create promo code' });
+  }
+});
+
+// Admin: update promo code
+app.put('/api/admin/promo-codes/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+    const { id } = req.params;
+    const b = req.body || {};
+    const updates = { updated_at: new Date().toISOString() };
+
+    if (b.code !== undefined) {
+      const normalized = normalizePromoCode(b.code);
+      if (!normalized) return res.status(400).json({ error: 'Code is required' });
+      updates.code = normalized;
+    }
+    if (b.discount_type !== undefined) {
+      if (!['percent', 'fixed'].includes(b.discount_type)) {
+        return res.status(400).json({ error: 'discount_type must be percent or fixed' });
+      }
+      updates.discount_type = b.discount_type;
+    }
+    if (b.discount_value !== undefined) {
+      const value = Number(b.discount_value);
+      if (!Number.isFinite(value) || value <= 0) {
+        return res.status(400).json({ error: 'discount_value must be greater than 0' });
+      }
+      updates.discount_value = value;
+    }
+    if (b.min_order_amount !== undefined) {
+      updates.min_order_amount = Math.max(0, Number(b.min_order_amount) || 0);
+    }
+    if (b.max_uses !== undefined) {
+      updates.max_uses = b.max_uses === '' || b.max_uses == null ? null : parseInt(b.max_uses, 10);
+      if (updates.max_uses != null && (!Number.isFinite(updates.max_uses) || updates.max_uses < 1)) {
+        return res.status(400).json({ error: 'max_uses must be a positive number or empty' });
+      }
+    }
+    if (b.active !== undefined) updates.active = b.active === true || b.active === 'true';
+    if (b.expires_at !== undefined) {
+      updates.expires_at = b.expires_at ? new Date(b.expires_at).toISOString() : null;
+    }
+
+    if ((updates.discount_type === 'percent' || b.discount_type === 'percent') && updates.discount_value > 100) {
+      return res.status(400).json({ error: 'Percent discount cannot exceed 100' });
+    }
+
+    const { data, error } = await supabase
+      .from('promo_codes')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) {
+      console.error('Promo update error:', error);
+      if (/duplicate|unique/i.test(error.message || '')) {
+        return res.status(400).json({ error: 'This promo code already exists' });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data) return res.status(404).json({ error: 'Promo code not found' });
+    res.json({ promo_code: data });
+  } catch (err) {
+    console.error('Promo update error:', err);
+    res.status(500).json({ error: err.message || 'Failed to update promo code' });
+  }
+});
+
+// Admin: delete promo code
+app.delete('/api/admin/promo-codes/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supabase) return res.status(503).json({ error: 'Database not configured' });
+    const { id } = req.params;
+    const { error } = await supabase.from('promo_codes').delete().eq('id', id);
+    if (error) {
+      console.error('Promo delete error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Promo delete error:', err);
+    res.status(500).json({ error: err.message || 'Failed to delete promo code' });
   }
 });
 
