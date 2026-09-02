@@ -957,6 +957,20 @@ async function syncProductReviewStats(productId) {
   }
 }
 
+/** Recalculate reviews/rating for every product from approved product_reviews. */
+async function syncAllProductReviewStats() {
+  if (!supabase) return;
+  const { data: products, error } = await supabase.from('products').select('id');
+  if (error) {
+    console.error('Review stats sync-all fetch error:', error);
+    return;
+  }
+  for (const p of products || []) {
+    await syncProductReviewStats(p.id);
+  }
+  console.log(`Synced review stats for ${(products || []).length} products`);
+}
+
 // Public: approved reviews for a product
 app.get('/api/products/:id/reviews', async (req, res) => {
   try {
@@ -1384,4 +1398,8 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  // Clear fake seeded review counts; keep only approved product_reviews stats
+  syncAllProductReviewStats().catch((err) => {
+    console.error('Initial review stats sync failed:', err);
+  });
 });

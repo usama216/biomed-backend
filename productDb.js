@@ -25,8 +25,8 @@ export function dbRowToApiProduct(row) {
   return {
     id: row.id,
     name: row.name,
-    rating: row.rating != null ? Number(row.rating) : 4.5,
-    reviews: row.reviews ?? 0,
+    rating: row.rating != null ? Number(row.rating) : 0,
+    reviews: row.reviews != null ? Number(row.reviews) : 0,
     questions: row.questions ?? 0,
     originalPrice: Number.isFinite(origN) ? origN : 0,
     discountedPrice: Number.isFinite(discN) ? discN : 0,

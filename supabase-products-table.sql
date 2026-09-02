@@ -13,7 +13,7 @@ create table if not exists public.products (
   image text not null default '',
   images jsonb not null default '[]'::jsonb,
   description text default '',
-  rating numeric default 4.5,
+  rating numeric default 0,
   reviews int default 0,
   questions int default 0,
   in_stock boolean not null default true,
@@ -37,7 +37,7 @@ alter table public.products add column if not exists discounted_price numeric;
 alter table public.products add column if not exists image text not null default '';
 alter table public.products add column if not exists images jsonb not null default '[]'::jsonb;
 alter table public.products add column if not exists description text default '';
-alter table public.products add column if not exists rating numeric default 4.5;
+alter table public.products add column if not exists rating numeric default 0;
 alter table public.products add column if not exists reviews int default 0;
 alter table public.products add column if not exists questions int default 0;
 alter table public.products add column if not exists in_stock boolean not null default true;
